@@ -1,7 +1,15 @@
+create type public.report_severity as enum (
+  'Low',
+  'Moderate',
+  'High',
+  'Very High',
+  'Critical'
+);
+
 create table public."GovtReport" (
   report_id uuid not null,
   status text not null default 'Reported'::text,
-  severity text not null default 'Medium'::text,
+  severity public.report_severity not null default 'Moderate'::report_severity,
   priority_score integer null,
   department_id integer null,
   district_id integer null,
@@ -15,6 +23,14 @@ create table public."GovtReport" (
   updated_at timestamp with time zone not null default now(),
   resolved_at timestamp with time zone null,
   verified_at timestamp with time zone null,
+  reporter_count integer not null default 0,
+  department_confidence numeric(5, 4) null,
+  severity_confidence numeric(5, 4) null,
+  priority_breakdown jsonb not null default '{}'::jsonb,
+  department_model_version text null,
+  severity_model_version text null,
+  priority_model_version text null,
+  priority_calculated_at timestamp with time zone null,
   constraint "GovtReport_pkey" primary key (report_id),
   constraint "GovtReport_assigned_to_fkey" foreign KEY (assigned_to) references admin_users (user_id) on delete set null,
   constraint "GovtReport_department_id_fkey" foreign KEY (department_id) references departments (id),
@@ -56,17 +72,15 @@ create table public."GovtReport" (
       )
     )
   ),
-  constraint "GovtReport_severity_check" check (
-    (
-      severity = any (
-        array[
-          'Low'::text,
-          'Medium'::text,
-          'High'::text,
-          'Critical'::text
-        ]
-      )
-    )
+  constraint govt_report_reporter_count_check check (reporter_count >= 0),
+  constraint govt_report_department_confidence_check check (
+    department_confidence between 0 and 1
+  ),
+  constraint govt_report_severity_confidence_check check (
+    severity_confidence between 0 and 1
+  ),
+  constraint govt_report_priority_breakdown_check check (
+    jsonb_typeof(priority_breakdown) = 'object'
   )
 ) TABLESPACE pg_default;
 

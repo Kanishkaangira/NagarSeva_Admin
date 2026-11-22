@@ -1,7 +1,7 @@
 :root {
   font-family: 'Segoe UI', sans-serif;
-  color: #17231f;
-  background: #f7f8f6;
+  color: #203651;
+  background: #f3f6fa;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -31,11 +31,11 @@ button {
 
 button:focus-visible,
 input:focus-visible {
-  outline: 3px solid rgba(37, 122, 91, 0.3);
+  outline: 3px solid rgba(39, 101, 170, 0.3);
   outline-offset: 2px;
 }
 
 ::selection {
   color: #fff;
-  background: #257a5b;
+  background: #245f9f;
 }

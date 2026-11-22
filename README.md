@@ -33,9 +33,26 @@ The client is exported from `src/lib/supabase.js`. It is `null` until both
 environment variables are configured. Restart the Vite server after changing
 environment variables.
 
-The starter does not assume a database schema. Create your tables and
-row-level security policies in Supabase before wiring the admin modules to
-queries.
+The recorded Supabase migration history is in `supabase/migrations`, and current
+table definitions are in `Tables schema`. Some live database objects were
+created outside the recorded migrations, so a fresh local database reset is not
+yet a complete reproduction of the linked project. The admin modules are not
+yet wired to query report data.
+
+## Report and AI schema
+
+The versioned Supabase migrations are in `supabase/migrations`. Each citizen
+submission remains a separate `UserReport`; `UserReport.issue_id` links it to
+the shared `GovtReport` issue. `GovtReport.reporter_count` tracks distinct
+citizens linked to that issue. Automated matching and AI processing are not
+implemented yet.
+
+`GovtReport.severity` uses the `report_severity` enum (`Low`, `Moderate`,
+`High`, `Very High`, `Critical`). The AI-ready fields capture department and
+severity confidence values from 0 to 1, model versions, and a
+`priority_breakdown` JSON object for scored factors and human-readable reasons.
+The existing `priority_score` remains a 0–100 value; no scoring algorithm or
+priority weights are defined by the schema.
 
 ## Scripts
 
