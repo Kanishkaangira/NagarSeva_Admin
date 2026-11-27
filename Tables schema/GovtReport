@@ -6,11 +6,29 @@ create type public.report_severity as enum (
   'Critical'
 );
 
+create type public.govt_report_status as enum (
+  'Reported',
+  'Viewed',
+  'Processing',
+  'Completed'
+);
+
+create type public.citizen_verification_status as enum (
+  'Pending',
+  'Work Completed',
+  'Work Not Completed'
+);
+
 create table public."GovtReport" (
   report_id uuid not null,
-  status text not null default 'Reported'::text,
-  severity public.report_severity not null default 'Moderate'::report_severity,
-  priority_score integer null,
+  status public.govt_report_status not null default 'Reported'::public.govt_report_status,
+  severity_level public.report_severity not null default 'Moderate'::report_severity,
+  severity_score integer null,
+  priority_score_district integer null,
+  priority_score_state integer null,
+  location text not null,
+  latitude double precision null,
+  longitude double precision null,
   department_id integer null,
   district_id integer null,
   assigned_to uuid null,
@@ -18,7 +36,7 @@ create table public."GovtReport" (
   authority_remarks text null,
   resolution_note text null,
   resolution_image_urls text[] not null default '{}'::text[],
-  citizen_verification text not null default 'Pending'::text,
+  citizen_verification public.citizen_verification_status not null default 'Pending'::public.citizen_verification_status,
   citizen_feedback text null,
   updated_at timestamp with time zone not null default now(),
   resolved_at timestamp with time zone null,
@@ -26,10 +44,12 @@ create table public."GovtReport" (
   reporter_count integer not null default 0,
   department_confidence numeric(5, 4) null,
   severity_confidence numeric(5, 4) null,
+  priority_confidence_state numeric(5, 4) null,
+  priority_confidence_district numeric(5, 4) null,
   priority_breakdown jsonb not null default '{}'::jsonb,
   department_model_version text null,
-  severity_model_version text null,
-  priority_model_version text null,
+  priority_model_version_state text null,
+  priority_model_version_district text null,
   priority_calculated_at timestamp with time zone null,
   constraint "GovtReport_pkey" primary key (report_id),
   constraint "GovtReport_assigned_to_fkey" foreign KEY (assigned_to) references admin_users (user_id) on delete set null,
@@ -41,40 +61,39 @@ create table public."GovtReport" (
       citizen_feedback = any (array['fixed'::text, 'not_fixed'::text])
     )
   ),
-  constraint "GovtReport_priority_score_check" check (
+  constraint govt_report_priority_score_district_check check (
     (
-      (priority_score >= 0)
-      and (priority_score <= 100)
+      (priority_score_district >= 0)
+      and (priority_score_district <= 100)
     )
   ),
-  constraint "GovtReport_citizen_verification_check" check (
+  constraint govt_report_priority_score_state_check check (
     (
-      citizen_verification = any (
-        array[
-          'Pending'::text,
-          'Confirmed'::text,
-          'Still Exists'::text
-        ]
-      )
+      (priority_score_state >= 0)
+      and (priority_score_state <= 100)
     )
   ),
-  constraint "GovtReport_status_check" check (
+  constraint govt_report_severity_score_check check (
     (
-      status = any (
-        array[
-          'Reported'::text,
-          'Assigned'::text,
-          'In Progress'::text,
-          'Resolved'::text,
-          'Reopened'::text,
-          'Closed'::text
-        ]
-      )
+      (severity_score >= 1)
+      and (severity_score <= 100)
     )
+  ),
+  constraint govt_report_latitude_check check (
+    latitude between -90 and 90
+  ),
+  constraint govt_report_longitude_check check (
+    longitude between -180 and 180
   ),
   constraint govt_report_reporter_count_check check (reporter_count >= 0),
   constraint govt_report_department_confidence_check check (
     department_confidence between 0 and 1
+  ),
+  constraint govt_report_priority_confidence_state_check check (
+    priority_confidence_state between 0 and 1
+  ),
+  constraint govt_report_priority_confidence_district_check check (
+    priority_confidence_district between 0 and 1
   ),
   constraint govt_report_severity_confidence_check check (
     severity_confidence between 0 and 1

@@ -47,12 +47,26 @@ the shared `GovtReport` issue. `GovtReport.reporter_count` tracks distinct
 citizens linked to that issue. Automated matching and AI processing are not
 implemented yet.
 
-`GovtReport.severity` uses the `report_severity` enum (`Low`, `Moderate`,
-`High`, `Very High`, `Critical`). The AI-ready fields capture department and
-severity confidence values from 0 to 1, model versions, and a
-`priority_breakdown` JSON object for scored factors and human-readable reasons.
-The existing `priority_score` remains a 0–100 value; no scoring algorithm or
-priority weights are defined by the schema.
+`GovtReport.severity_level` uses the `report_severity` enum (`Low`, `Moderate`,
+`High`, `Very High`, `Critical`); `severity_score` stores its numeric score
+from 1 to 100 and remains null until scoring is implemented. The AI-ready
+fields capture department and severity confidence values from 0 to 1, model
+versions, and a `priority_breakdown` JSON object for scored factors and
+human-readable reasons. Severity confidence is retained; the unused severity
+model-version field has been removed.
+`priority_score_district` and `priority_score_state` separately store district-
+and state-level scores from 0 to 100. District admins see the district score;
+state-level admins see the state score. Each score has its own confidence
+(`priority_confidence_district` / `priority_confidence_state`) and model
+version field. Existing shared priority confidence/version values were copied
+to both scopes. Scores are not calculated yet because no scoring algorithm or
+priority weights have been implemented.
+
+`GovtReport.status` uses the `govt_report_status` enum: `Reported`, `Viewed`,
+`Processing`, and `Completed`. Admins advance reports through those states
+from the dashboard; linked citizen reports are kept in sync.
+`GovtReport.location`, `latitude`, and `longitude` store the text location and
+optional coordinates copied from the canonical citizen report.
 
 ## Scripts
 
