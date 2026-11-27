@@ -22,10 +22,12 @@ create table public."UserReport" (
   status text not null default 'Reported'::text,
   citizen_feedback text null,
   updated_at timestamp with time zone not null default now(),
+  issue_id uuid null,
   constraint "UserReport_pkey" primary key (id),
   constraint "UserReport_complaint_number_key" unique (complaint_number),
   constraint "UserReport_user_id_fkey" foreign KEY (user_id) references profiles (id) on delete CASCADE,
   constraint "UserReport_district_id_fkey" foreign KEY (district_id) references districts (id),
+  constraint user_report_issue_id_fkey foreign KEY (issue_id) references "GovtReport" (report_id) on delete set null,
   constraint "UserReport_citizen_feedback_check" check (
     (
       citizen_feedback = any (array['fixed'::text, 'not_fixed'::text])
@@ -85,9 +87,19 @@ create index IF not exists user_report_user_created_at_idx on public."UserReport
 
 create index IF not exists user_report_district_idx on public."UserReport" using btree (district_id) TABLESPACE pg_default;
 
+create index IF not exists user_report_issue_id_idx on public."UserReport" using btree (issue_id) TABLESPACE pg_default;
+
 create trigger create_govt_report_after_user_report_insert
 after INSERT on "UserReport" for EACH row
 execute FUNCTION create_govt_report_for_user_report ();
+
+create trigger user_report_maintain_issue_reporter_count
+after INSERT
+or DELETE
+or
+update OF issue_id,
+user_id on "UserReport" for EACH row
+execute FUNCTION maintain_govt_report_reporter_count ();
 
 create trigger sync_user_report_district
 after

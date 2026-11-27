@@ -1,0 +1,271 @@
+# Nagar Seva AI: AI Agent Service
+
+## PART 1: THE BIG PICTURE (read this first)
+
+### What the product is
+Nagar Seva AI is a civic complaint platform for the state of Haryana, India. Citizens use a mobile app to report broken public infrastructure: roads, flyovers, bridges, buildings, streetlights, sewage and drainage, water leaks, damaged electric poles. Government officials use a web admin portal to see the complaints, fix them, and mark them resolved. The citizen then sees the result in the app.
+
+### What this repo is
+This repo is **only the AI service**. It is a Python FastAPI service that watches new complaints in the database and runs **5 AI agents** on each one. The agents prepare the complaint so officials see it already sorted:
+
+1. which department should handle it, and which district officer,
+2. where exactly it is, verified from the photo's GPS,
+3. whether it is a duplicate of a problem someone already reported,
+4. how severe it is,
+5. how urgently the government should fix it, with an explanation.
+
+Other parts already exist and are NOT in this repo: the citizen mobile app, the admin web portal, and the Supabase backend (Postgres, Auth, Storage, Row Level Security). This service talks to Supabase.
+
+### The idea in one paragraph
+The AI is a **smart assistant to government officials, not a decision-maker**. It does the reading, looking at photos, comparing and scoring, so a human can review in seconds instead of minutes. Every AI answer comes with a confidence number and a stored reason. Humans can override anything. If the AI fails or is unsure, the complaint still reaches a human.
+
+### Who the users are (so you understand the output)
+| User | What they need from the AI |
+|---|---|
+| Citizen | Their complaint gets to the right department fast |
+| Super Admin (platform owner) | A review queue of complaints the AI was unsure about, with the AI's suggestion pre-filled |
+| Authority Admin (state level, one department, whole Haryana) | A statewide ranking of what to fix first, with reasons |
+| District Officer (one department, one district) | A ranking of what to fix first in their district, with reasons |
+
+### What we are NOT doing
+- We are **not training or fine-tuning any model**. We use Google **Gemini API** with prompts, rubrics and structured output, plus plain code and formulas.
+- It is **not fully autonomous ("agentic") AI**. It is a fixed pipeline of 5 specialist steps. The code decides the order. The AI never chooses its own actions.
+- The AI **never resolves or closes a complaint**.
+
+---
+
+## PART 2: A WORKED SCENARIO (the pipeline in action)
+
+**Setup:** Rewari district. PWD (B&R) officer for Rewari exists in `admin_users`.
+
+**Step 0. Citizen A reports a pothole.**
+Anita opens the app, takes a photo (the app only accepts photos with GPS data), types "Big pothole near bus stand, bikes are slipping", and submits. The app inserts a row into `"UserReport"`. A DB trigger automatically creates a matching `"GovtReport"` row (`report_id` = the UserReport id). A Supabase webhook calls this service: `POST /webhooks/new-report`.
+
+**Step 1. Agent 2 (Location).**
+Reads the photo's EXIF GPS and the submitted lat/long. They agree within 20 m. District is confirmed as Rewari. Builds a readable address: "Near Bus Stand, Rewari". Writes `location`, `latitude`, `longitude` to GovtReport.
+
+**Step 2. Agent 1 (Routing).**
+Reads "Pothole", the description and the verified district. Category = `pothole`. Looks up `routing_rules`: pothole in Rewari on a state road maps to PWD_BR. Confidence 0.91. Finds the active district officer for PWD_BR + Rewari and sets `assigned_to`. If `AUTO_ASSIGN_ENABLED` is false (the default), it does not assign. It stores the suggestion and leaves `department_id` NULL, so the Super Admin sees "Suggested: PWD_BR, 91%" in the Assignment Center and clicks Approve.
+
+**Step 3. Agent 3 (Duplicate check).**
+No open pothole issue within 50 m yet. Not a duplicate. Anita's report becomes the master issue.
+`reporter_count` = 1 (maintained by a database trigger).
+
+**Step 4. Agent 4 (Severity).**
+Looks at the photo and text: a large crater, water inside, a bike visible nearby. `severity_score` = 68, so `severity_level` = Very High (derived in code from the score). Confidence 0.8. Reason stored: "Large deep pothole on a busy road, visible hazard to two-wheelers."
+
+**Step 5. Agent 5 (Priority).**
+Computes by formula: `priority_score_state` = 71 and `priority_score_district` = 88 (ranked #2 of 31 open PWD complaints in Rewari). Saves `priority_breakdown` with each factor, its points and a plain-language explanation. When the officer clicks "Why this priority?" in the web portal, the portal reads that explanation.
+
+**Step 6. Later: Citizen B reports the same pothole.**
+Bharat submits a report two days later from a slightly different angle. The pipeline runs. Agent 2 verifies location (38 m from Anita's report). Agent 3 finds Anita's open issue in the same department within 50 m and asks the LLM to compare. Verdict: same issue, confidence 0.94 (>= `DUPLICATE_THRESHOLD`).
+
+- Agent 3 sets `"UserReport"(Bharat).issue_id` = Anita's `report_id`. **That is all it does.**
+- The DB trigger `maintain_govt_report_reporter_count` recounts. `reporter_count` becomes 2.
+- Agents 1 and 4 are skipped for Bharat's report (the master already has them).
+- Agent 5 re-runs for the master issue, because `reporter_count` changed. Priority rises a little.
+
+Officials still see **one issue, "reported by 2 citizens"**. Both Anita and Bharat see status updates in their app, because both reports point to the same master GovtReport.
+
+**Step 7. Resolution.**
+The officer fixes it, uploads proof photos, and marks it Resolved. DB triggers sync the status to the citizens' reports. Citizens confirm "fixed" or say "still exists" (the complaint reopens). The AI is not involved.
+
+**Step 8. Fifteen days later.**
+The scheduler re-runs Agent 5 on every open complaint. A complaint that has been open for 20 days with a 7-day deadline has risen in priority. Officials always see an up-to-date ranking.
+
+---
+
+## PART 3: THE RULES (never violate)
+
+1. **AI suggests, humans decide.** The AI never resolves or closes anything and never deletes a report.
+2. **AI failure must never block a complaint.** Mark the agent run as failed, log it, and leave the complaint visible to admins.
+3. **Never overwrite a human's change.** Before writing an AI value to a field, check the audit log. If the current value differs from the last AI-written value, a human edited it, so skip that field.
+4. **Shadow mode first.** `AUTO_ASSIGN_ENABLED=false` by default. When enabled, it applies only at or above `AUTO_ASSIGN_THRESHOLD`.
+5. **Every number has a stored reason.** The explanation shown to officials is built from saved data, never invented afterwards.
+6. **Never write `reporter_count`.** Only the database trigger writes it. A duplicate is recorded by setting `UserReport.issue_id`. (Reason: a trigger recounts correctly every time, even if an agent retries; an agent that adds +1 would double-count on retries and lose updates in races.)
+7. **Service-role key only in this server's environment.** Never in logs, the repo, the web portal or the mobile app.
+8. **Privacy.** Never send citizen name, phone, email or profile data to Gemini. Send only complaint text, category, photos and location.
+9. **Idempotent.** Running the pipeline twice on one complaint produces no duplicate side effects.
+10. **Do not guess the items in Part 9 ("Open items").** Ask me.
+
+---
+
+## PART 4: THE DATABASE (Supabase / Postgres), source of truth is the SQL in Part 10
+
+### Admin hierarchy (already built, enforced by RLS)
+| Role | department_id | district_id | Sees |
+|---|---|---|---|
+| `super_admin` | NULL | NULL | Everything |
+| `authority_admin` | required | NULL | One department, all of Haryana |
+| `district_officer` | required | required | One department, one district |
+No field-engineer level. `GovtReport.assigned_to` points to `admin_users.user_id`.
+
+### Reference tables
+- `departments` (use `code` in logic): PWD_BR, ULB, PHED, DHBVN, UHBVN, HSVP, NHAI (external: no login, forward and track only). Others exist with `is_active=false`.
+- `districts`: Haryana has **23 districts**, including Hansi (created recently, carved from Hisar). Read the real rows from the table; do not hardcode.
+
+### `"UserReport"` = what the citizen submitted
+`id`, `user_id`, `"Issue Type"`, `"Description"`, `"MoreDetail"`, `image_urls text[]`, `latitude`, `longitude`, `location_address`, `district_id`, `complaint_number`, `status` (text), `issue_id uuid -> "GovtReport"(report_id)`, timestamps.
+
+### `"GovtReport"` = the government's master issue
+`report_id` (PK, FK to UserReport.id), `status` (enum `govt_report_status`), `severity_level` (enum `report_severity`), `severity_score` (1-100), `severity_confidence`, `priority_score_district`, `priority_score_state`, `priority_confidence_district`, `priority_confidence_state`, `priority_model_version_district`, `priority_model_version_state`, `priority_breakdown jsonb` (always an object), `priority_calculated_at`, `department_id`, `department_confidence`, `department_model_version`, `district_id`, `assigned_to`, `assigned_at`, `reporter_count`, `location text NOT NULL`, `latitude`, `longitude`, plus authority_remarks, resolution_note, resolution_image_urls, `citizen_verification` (enum `citizen_verification_status`: `Pending`, `Work Completed` when all citizens confirm the work is complete, or `Work Not Completed` when any citizen reports it is incomplete), citizen_feedback, timestamps.
+
+### Key relationship
+**`GovtReport` is the master issue. Many `UserReport` rows can point to one master via `UserReport.issue_id`.** `reporter_count` counts the linked citizens and is maintained by the trigger `maintain_govt_report_reporter_count`.
+
+Quoted names are case-sensitive: `"UserReport"`, `"GovtReport"`, `"Issue Type"`. Read the real enum labels for `govt_report_status` and `report_severity` from the database; do not assume them. Severity levels should be Low, Moderate, High, Very High, Critical.
+
+### Existing triggers
+GovtReport auto-created on UserReport insert; status, feedback and district sync between the tables; `guard_govt_report_update` limits who can change which column (it skips checks when `auth.uid()` is NULL, which is how this service writes with the service role).
+
+### MANDATORY first task: review these function bodies and report problems to me before coding
+`create_govt_report_for_user_report`, `maintain_govt_report_reporter_count`, `sync_govt_report_status_to_user_report`, `guard_govt_report_update`, `set_govt_report_district`, `sync_user_report_district_to_govt`, `sync_citizen_feedback_to_govt_report`. Check specifically:
+- Do any still reference removed columns (`severity`, `priority_score`, free-text `department`)?
+- **Duplicates:** the insert trigger creates a GovtReport for every new UserReport. When a report becomes a duplicate, its own GovtReport row is redundant and would appear as a separate issue. How should it be hidden or removed? Do NOT delete anything until I approve a plan.
+- Does the status sync update **all** UserReports linked via `issue_id`, not only the one whose `id` equals `report_id`? (Otherwise Bharat never sees his complaint resolved.)
+- Does `reporter_count` count **distinct** `user_id` (so one citizen reporting twice counts once)?
+
+---
+
+## PART 5: THE FIVE AGENTS
+
+### Execution order (differs from the agent numbers on purpose, because later agents depend on earlier results)
+```
+Agent 2 Location -> Agent 1 Routing -> Agent 3 Duplicate -> Agent 4 Severity -> Agent 5 Priority
+```
+Trigger: Supabase Database Webhook on `"UserReport"` INSERT -> `POST /webhooks/new-report` (shared-secret header). Wait/retry until the GovtReport row exists (the creation trigger and the webhook can race). If Agent 3 finds a duplicate: link it, skip Agents 1 and 4 for the new report, re-run Agent 5 for the master. Each agent writes its result plus an audit row before the next starts. One agent failing does not stop the others from being logged, and never hides the complaint.
+
+### Agent 2: Location verification
+- **Reads:** UserReport lat/long and `location_address`; **EXIF GPS from the uploaded photos** (the app only accepts photos with GPS data).
+- **Does (deterministic code, not the LLM):** extract EXIF GPS; compare with the submitted lat/long; flag a mismatch beyond `LOCATION_MISMATCH_METERS`; determine the district by point-in-polygon; reverse-geocode a readable address. The LLM may at most describe surroundings from the photo (road type, near junction) and must never create or change coordinates or addresses.
+- **Writes:** GovtReport `location`, `latitude`, `longitude`; corrects `district_id` (also UserReport.district_id if wrong, and logs it). If EXIF is missing, fall back to the submitted coordinates and record lower location confidence in the audit log.
+- Tell me if Supabase Storage uploads or app compression strip EXIF.
+
+### Agent 1: Routing (department and district officer)
+- **Reads:** `"Issue Type"`, `"Description"`, `"MoreDetail"`, address, lat/long, verified `district_id` (from Agent 2), and the `routing_rules` table.
+- **Does:** the LLM picks a **category** from a fixed list, with a confidence. **Code** then maps category + district to a department through `routing_rules`. The LLM must not decide asset ownership alone. Ambiguous ownership (e.g. sewage: PHED vs ULB) must give **low confidence**, never a confident guess.
+- **Writes:** `department_id`, `department_confidence`, `department_model_version`; `assigned_to` and `assigned_at` only when an active `district_officer` exists for that department and district; status set to the "Assigned" label only when auto-assign actually applies.
+- **Auto-assign:** only if `AUTO_ASSIGN_ENABLED` and confidence >= `AUTO_ASSIGN_THRESHOLD`. Otherwise leave `department_id` NULL (it appears in the Super Admin's Assignment Center) and store the suggestion, confidence and reasoning in the audit table so the portal can show "Suggested: PWD_BR, 91%".
+- NHAI is external: it can be suggested, but never create an assignee for it.
+
+### Agent 3: Duplicate detection
+- **Reads:** the new report and **open master issues** with the same `department_id`, within `DUPLICATE_RADIUS_METERS` (default 50) and `DUPLICATE_WINDOW_DAYS`.
+- **Does:** (1) SQL/code prefilter by department, distance, open status; (2) only for the few candidates, the LLM compares category, description (and photos if useful) and returns `same_issue`, confidence, reason.
+- **If duplicate and confidence >= `DUPLICATE_THRESHOLD`:** set `UserReport.issue_id` to the master's `report_id`. **Do not touch `reporter_count`**; the trigger counts. Handle the redundant GovtReport row only as I approve after your trigger review.
+- **If uncertain:** do NOT merge. Keep separate and flag for human review. Wrongly merging two different problems loses a citizen's report, so be conservative.
+
+### Agent 4: Severity
+- **Reads:** description, category (from Agent 1), photos (signed Storage URLs, resized, capped at `MAX_IMAGES`), location context.
+- **Outputs (structured):** `severity_score` 1-100, `confidence` 0-1, short `reason` (what it saw), `mismatch` flag (photo vs description), `image_quality` (ok, blurry, dark, irrelevant).
+- **The level is derived from the score in code, never by the LLM:** 1-20 Low, 21-40 Moderate, 41-60 High, 61-80 Very High, 81-100 Critical.
+- Use a written rubric with 2-3 worked examples per band (exposed rebar or live wire = Critical band; faded road marking = Low band). Keep rubric and examples in `prompts/`, versioned.
+- No usable image: score from text only, with lower confidence. Mismatch: lower confidence and flag for review.
+- **Writes:** `severity_score`, `severity_level`, `severity_confidence`. Never overwrite a human-changed value (Rule 3).
+
+### Agent 5: Priority (two scores) and explanation
+Computed by a **formula in Python, not by the LLM**.
+
+| Column | Audience | Meaning |
+|---|---|---|
+| `priority_score_state` | authority_admin | Absolute urgency on one statewide 0-100 scale, comparable across districts |
+| `priority_score_district` | district_officer | Rank among open complaints of the same `department_id` + `district_id`, scaled 0-100 (percentile) |
+
+Starting factors (weights in a versioned config file, tuned later with real officers): severity score, age vs a per-category resolution deadline (SLA), `reporter_count` (log-scaled), issue-type risk, reopened flag, location risk. **Location risk needs map data I have not chosen: leave it out and lower confidence until I decide.** Only open complaints are scored.
+
+**Explanation (required):** store in `priority_breakdown` JSON, for each score: the factor, raw value, weight, points contributed, and a plain-language `explanation` built from those numbers (for the district score also: "ranked #N of M open <department> complaints in <district>"). Numbers and text come from the same data. An LLM may only rephrase the text, never change numbers. The admin portal reads this for its "Why this priority?" panel.
+
+**Confidence** (`priority_confidence_state` / `_district`): a defined heuristic, not a calibrated probability, combining upstream confidences (severity, department, location) and data completeness (photo present, EXIF valid, enough comparable complaints). Document the exact formula.
+
+**Writes:** both scores, both confidences, both model versions, `priority_breakdown`, `priority_calculated_at`.
+
+**Recalculation:** the scheduled job re-runs Agent 5 for all open GovtReports every `PRIORITY_RECALC_DAYS` (default **15**, configurable). Also recalculate immediately for one report when `reporter_count`, severity or status changes, or it is reopened. District percentiles shift whenever other complaints arrive or close, so make the interval easy to shorten and recompute only open reports.
+
+---
+
+## PART 6: CONFIGURATION, VERSIONS AND THE LLM
+
+### Settings (config/env, never hardcoded)
+`AUTO_ASSIGN_ENABLED` (default false), `AUTO_ASSIGN_THRESHOLD`, `DUPLICATE_THRESHOLD`, `DUPLICATE_RADIUS_METERS` (50), `DUPLICATE_WINDOW_DAYS`, `LOCATION_MISMATCH_METERS`, `MAX_IMAGES`, `PRIORITY_RECALC_DAYS` (15), Supabase URL and service key, Gemini key, webhook secrets.
+LLM self-reported confidence is not automatically accurate. Set thresholds from test-set measurements, not guesses.
+
+### Model versions
+Format `<agent>-v<MAJOR>.<MINOR>` (`router-v1.0`, `priority-v1.0`). Bump when a prompt, rubric, formula weight or the Gemini model changes. Write to `department_model_version`, `priority_model_version_state`, `priority_model_version_district`, and into every audit row (severity, location and duplicate have no column). A version bump must make it possible to find and re-run reports scored by older versions.
+
+### LLM rules (Gemini)
+- All model calls go through **one file, `llm.py`**: `ask_text(prompt, schema)` and `ask_with_images(prompt, image_urls, schema)`. Nothing else imports the Gemini SDK, so the provider can change later.
+- Responses are **structured JSON validated by Pydantic**. Invalid output: retry N times, then mark the agent failed.
+- Low temperature. Resize images before sending. Back off and retry on rate limits (free tier is small); a 429 must never lose a complaint.
+- Prompts and rubrics are files in `prompts/` with a version header, not inline strings.
+- The free tier is for **test data only**. Do not send real citizen photos to it, since free tiers may use inputs to improve models. Real data needs a paid tier after I review the provider's data terms.
+
+---
+
+## PART 7: ENDPOINTS AND STRUCTURE
+
+- `POST /webhooks/new-report` (secret header): run the pipeline.
+- `POST /jobs/rescore` (secret header, called by cron): re-run Agent 5 for open reports whose `priority_calculated_at` is older than `PRIORITY_RECALC_DAYS`; retry failed pipeline runs.
+- `POST /reports/{id}/reprocess`: re-run the pipeline for one report. Verify the caller's Supabase JWT and require `super_admin`.
+- `GET /health`.
+- Later: `POST /reports/{id}/ask` ("Ask AI why"). Verify the caller's JWT and confirm they can see the report by querying with their own token so RLS decides. Answer only from `priority_breakdown` and audit rows.
+
+```
+ai_service/
+  app/
+    main.py  config.py  db.py  llm.py  schemas.py  orchestrator.py  jobs.py
+    agents/ location.py routing.py duplicate.py severity.py priority.py
+    geo/    exif.py  district_lookup.py  geocode.py
+    prompts/   (versioned prompt and rubric files)
+  tests/  evals/   (labelled test set and evaluation scripts)
+  .env.example  README.md
+```
+Keep all Supabase queries in `db.py`. Handle error, retry and empty states explicitly.
+
+---
+
+## PART 8: TESTING (a core deliverable, not an afterthought)
+
+Build a labelled test set (30-50 cases at first) with your own or dataset photos, **not real citizens' photos**. Cover every category, plus hard cases: blurry or no photo, text that disagrees with the photo, vague text, Hindi and Hinglish, sewage (PHED vs ULB), near-duplicates and look-alike non-duplicates. Keep it separate from the examples used inside prompts.
+
+Measure per agent:
+- **Routing:** category and department accuracy; whether confidence is calibrated (is it right ~90% of the time when it says 0.9?); a confusion list.
+- **Severity:** average point error; level match; cases off by 2+ levels; **recall on truly Critical cases (a missed Critical is the worst error)**.
+- **Duplicate:** false merges (worst) and missed duplicates.
+- **Location:** EXIF vs submitted mismatch handling; correct district, including Hansi.
+- **Priority:** unit tests. Older and more severe ranks above newer and minor; more reporters never lowers the score; same input gives the same output; breakdown points sum to the score.
+- **Consistency:** run the same case 5 times; classification must be identical and severity nearly so.
+Save every run (date, prompt version, results). Re-run after any prompt, formula or model change.
+
+In shadow mode, log every admin override of an AI value. The override rate is the best real-world quality measure.
+
+---
+
+## PART 9: OPEN ITEMS (ask me; do not decide)
+
+1. District boundary polygons (must include the new Hansi district): source not chosen.
+2. Reverse-geocoding provider, with its limits and terms.
+3. Is PostGIS enabled in my Supabase project? (affects duplicate search)
+4. How to handle the redundant GovtReport row for duplicates (after your trigger review).
+5. Does EXIF survive upload and app compression?
+6. Location-risk data (schools, hospitals, main roads).
+7. Per-category resolution deadlines (SLA) for the age factor.
+8. Real `routing_rules` data for the pilot district, and the DHBVN/UHBVN area mapping (not yet verified).
+9. Proposed new tables (show me the final SQL, do NOT apply until I approve): `ai_agent_runs` (audit log: report_id, agent, model, model_version, input_summary jsonb, output jsonb, confidence, latency_ms, error, created_at; readable only by super_admin) and `routing_rules` (category, district_id NULL=all, department_id, notes, is_active); plus a processing status and review flags (for example `ai_status` and `ai_flags text[]` on GovtReport). Tell me if flags belong in `ai_agent_runs` instead.
+
+---
+
+## PART 10: HOW I WANT YOU TO WORK
+
+Build **one step at a time and wait for my OK between steps**:
+1. Read the trigger functions, report problems, propose the SQL in Part 9 item 9.
+2. Skeleton: config, db layer, `llm.py`, webhook, audit logging, orchestrator with stub agents.
+3. Agent 2 (location), then Agent 1 (routing) in shadow mode.
+4. Agent 3 (duplicates), conservative.
+5. Agent 4 (severity) with the rubric.
+6. Agent 5 (priority, breakdown, explanations) and the scheduler.
+7. Evaluation harness (Part 8).
+8. Only after good shadow-mode results, consider enabling auto-assign.
+
+Before step 1: summarize your understanding in a few lines and list your questions. Use Python 3.11+, type hints and Pydantic models. Never use the service-role key in anything browser-facing, and never log keys, signed URLs or full complaint text.
+
+### Current schema (source of truth)
+[PASTE: profiles, departments, districts, admin_users, "UserReport", "GovtReport", the enum definitions (govt_report_status, report_severity), and ALL trigger function bodies]
